@@ -312,6 +312,40 @@ pub fn check(verified_card:Vec<Card>)->Option<Poker>{
 
 
 
+pub fn compare(last:Vec<Card>,old:Vec<Card>)->bool{
+    if old.len()==0{
+        return true;
+    }
+    let last_poke = check(last.clone());
+    let old_poke  = check(old.clone());
+    match last_poke {
+        Some(last_poke1)=>{
+            let old_poke2 = old_poke.unwrap();
+            if last_poke1.pt == PlayType::Bomb{
+                if old_poke2.pt ==PlayType::Bomb&& last_poke1.max<old_poke2.max{
+                    return false;
+                }else{
+                    return true;
+                }
+            }else{
+                if last.len() == old.len()&& 
+                last_poke1.quantity == old_poke2.quantity && 
+                last_poke1.max>old_poke2.max{
+                    return true;
+                }
+            }
+        },
+        None =>{
+            return false;
+        }
+    }
+
+    return false;
+
+}
+
+
+
 use std::collections::HashSet;
 
 fn is_consecutive_hashset(nums: &[u8]) -> (bool,u8) {

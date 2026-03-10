@@ -200,6 +200,7 @@ async fn handle_client(conn: quinn::Incoming, clients: ClientMap) -> Result<()> 
         match recv_stream.read(&mut read_buf).await? {
             Some(n) => {
                 let mut msg: Message = from_bytes(&read_buf[..n]).unwrap();
+                println!("{}:{:?}",remote_addr,msg);
                 // 广播给所有客户端（包括自己）
                 if msg.command == NetworkMessage::Ready {
                     let mut map = clients.lock().await;
@@ -240,17 +241,23 @@ async fn handle_client(conn: quinn::Incoming, clients: ClientMap) -> Result<()> 
                         for (index, (_addr1, sender)) in map.iter().enumerate() {
                             if index == 0 {
                                 play1_msg.id = sender.id.clone();
-                                play1_msg.carddata = player1_cards
+                                let mut p1: Vec<Card> = player1_cards
                                     .iter()
                                     .chain(underhand.iter())
                                     .copied()
-                                    .collect();
+                                    .collect(); 
+                                p1.sort_by(|a, b| b.value().cmp(&a.value()));
+                                play1_msg.carddata = p1;
                             } else if index == 1 {
                                 play2_msg.id = sender.id.clone();
-                                play2_msg.carddata = player2_cards.clone();
+                                let mut p2 = player2_cards.clone();
+                                p2.sort_by(|a, b| b.value().cmp(&a.value()));
+                                play2_msg.carddata = p2;
                             } else if index == 2 {
                                 play3_msg.id = sender.id.clone();
-                                play3_msg.carddata = player3_cards.clone();
+                                let mut p3 = player3_cards.clone();
+                                p3.sort_by(|a, b| b.value().cmp(&a.value()));
+                                play3_msg.carddata = p3;
                             }
                         }
                         for (_index, (_addr1, sender)) in map.iter().enumerate() {

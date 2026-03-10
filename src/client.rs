@@ -2,20 +2,21 @@ use egui::Vec2;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::crypto::{CryptoProvider, ring};
 use rustls::pki_types::CertificateDer;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 mod common;
 
+use crate::common::card::{Card, check, compare};
 use crate::common::net::{Message, NetworkMessage};
 use eframe::egui;
 use eframe::epaint::text::{FontInsert, InsertFontFamily};
+use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use postcard::from_bytes;
 use quinn::{Connection, Endpoint};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-
 struct Player {
     pub id: String,
     pub is_ready: bool,
@@ -42,7 +43,7 @@ struct MyApp {
     receive: UnboundedReceiver<Message>,
     messages: Vec<Message>,
     my_cards: Option<Message>,
-    button_offsets:Vec<f32>,
+    button_offsets: Vec<bool>,
     conn: Connection,
     endpoint: Endpoint,
     input_text: String,
@@ -50,7 +51,8 @@ struct MyApp {
     is_ready: bool,
     players: Vec<Player>,
     my_turn: usize,
-    rounds:usize,
+    rounds: usize,
+    toasts: Toasts,
 }
 
 impl MyApp {
@@ -69,20 +71,51 @@ impl MyApp {
             receive: urm,
             messages: vec![],
             my_cards: None,
-            button_offsets:Vec::new(),
+            button_offsets: Vec::new(),
             conn: conn,
             endpoint: edpt,
             input_text: "".to_owned(),
             current_cards: None,
             is_ready: false,
-            players: Vec::new(),
+            players: vec![],
             my_turn: 0,
-            rounds:0,
+            rounds: 0,
+            toasts: Toasts::new()
+                .anchor(egui::Align2::RIGHT_TOP, (10.0, 10.0)) // 位置
+                .direction(egui::Direction::TopDown),
         }
     }
     fn sendmsg(&self, message: Message) {
         self.send.send(message).unwrap();
     }
+
+    fn get_play_card(&self) -> Vec<Card> {
+        let mut cards = vec![];
+        for (index, flag) in self.button_offsets.iter().enumerate() {
+            if *flag {
+                let card = self.my_cards.as_ref().unwrap().carddata[index];
+                cards.push(card.clone());
+            }
+        }
+        cards
+    }
+    fn clear_play(&mut self) {
+        // 方法2a：从后向前遍历删除（避免索引变化问题）
+        let mut i = self.button_offsets.len();
+        while i > 0 {
+            i -= 1;
+            if self.button_offsets[i] {
+                self.button_offsets.remove(i);
+                self.my_cards.as_mut().unwrap().carddata.remove(i);
+            }
+        }
+    }
+    fn reset_play(&mut self) {
+        for flag in self.button_offsets.iter_mut() {
+            *flag = false;
+        }
+    }
+
     fn close(&self) {
         self.send
             .send(Message {
@@ -184,32 +217,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         let mut len_buf = [0u8; 4];
         loop {
-             
             match recv_stream.read_exact(&mut len_buf).await {
                 Ok(()) => {
-                    let len = u32::from_be_bytes(len_buf) as usize; 
+                    let len = u32::from_be_bytes(len_buf) as usize;
                     let mut data = vec![0u8; len];
                     recv_stream.read_exact(&mut data).await;
-                    match from_bytes(&data){
-                        Ok(msg)=>{
+                    match from_bytes(&data) {
+                        Ok(msg) => {
                             // println!("--------- {:?}",msg);
                             match suf_tx.send(msg) {
-                                Err(e)=>{
-                                    eprintln!("发送ui消息失败：{}",e);
-                                },
-                                _=>{}
+                                Err(e) => {
+                                    eprintln!("发送ui消息失败：{}", e);
+                                }
+                                _ => {}
                             };
-                        },
-                        Err(e)=>{
-                            eprintln!("解析消息失败：{}",e);
+                        }
+                        Err(e) => {
+                            eprintln!("解析消息失败：{}", e);
                         }
                     }
-                    
                 }
                 _ => {
                     println!("读取消息失败");
                     break;
-                },
+                }
             }
         }
         println!("⚠️ Server closed connection.");
@@ -254,80 +285,118 @@ fn add_font(ctx: &egui::Context) {
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
         if let Ok(msg) = self.receive.try_recv() {
-            
             ctx.request_repaint();
             // println!("消息: {:?}",msg);
+
             match msg.command {
                 NetworkMessage::Deal => {
-                    if msg.id == self.id{
+                    if msg.id == self.id {
                         let len = msg.carddata.len();
-                        self.button_offsets =vec![0.0;len];
+                        self.button_offsets = vec![false; len];
                         self.my_cards = Some(msg.clone());
-                        
                     }
                     let mut player = Player::new(msg.id.clone());
                     player.card_num = msg.carddata.clone().len();
                     player.is_lord = msg.carddata.len() == 20;
                     player.is_ready = true;
                     self.players.push(player);
-                    if self.players.len() ==3 {
+                    if self.players.len() == 3 {
                         self.rounds = 0;
-                        for (index,player) in self.players.iter_mut().enumerate() {
-                            if player.id == self.id{ 
+                        for (index, player) in self.players.iter_mut().enumerate() {
+                            if player.id == self.id {
                                 self.my_turn = index;
                             }
                         }
                     }
                 }
-                
+                NetworkMessage::Play => {
+                    self.rounds = self.rounds + 1;
+                    self.current_cards = Some(msg.clone());
+                    let id = msg.id.clone();
+                    for player in self.players.iter_mut() {
+                        if player.id == id {
+                            player.card_num = player.card_num - msg.carddata.len();
+                            if player.card_num == 0 {
+                                self.toasts.add(Toast {
+                                    text: format!("恭喜{}获得胜利", id).as_str().into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default(),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                }
+                NetworkMessage::Skip => {
+                    self.rounds = self.rounds + 1;
+                    if self.rounds % 3 == self.my_turn {
+                        if self.current_cards.is_some() {
+                            let cc = self.current_cards.clone().unwrap();
+                            if cc.id == self.id {
+                                self.current_cards = None;
+                            }
+                        }
+                    }
+                }
+
                 _ => {
                     self.messages.push(msg.clone());
                 }
             }
         }
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label(format!("当前ID:{}",self.id));
+            ui.label(format!("当前ID:{}", self.id));
             // ui.add_sized([ui.available_width(), 200.0], |ui| {
 
             // });
             egui::Frame::group(ui.style()).show(ui, |ui| {
-
                 if let Some(my_card) = self.my_cards.clone() {
-                    // 渲染5个按钮
-                    for (i,card) in my_card.carddata.iter().enumerate() {
-                        // 为每个按钮添加垂直偏移
-                        ui.add_space(5.0); // 按钮之间的间距
-                        
-                        // 创建一个包含按钮的垂直布局，用于应用偏移
-                        ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        if self.players.len() >= 3 {
+                            ui.label(format!(
+                                "玩家:{} 剩余牌数量:{}",
+                                self.players[(self.my_turn + 2) % 3].id,
+                                self.players[(self.my_turn + 2) % 3].card_num
+                            ));
+                            ui.separator();
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.label("当前出牌:");
+                                if let Some(ccards) = self.current_cards.clone() {
+                                    for card in ccards.carddata.iter() {
+                                        ui.label(format!("{}", card.display_name()));
+                                    }
+                                }
+                            });
+                            ui.separator();
+                            ui.label(format!(
+                                "玩家:{} 剩余牌数量:{}",
+                                self.players[(self.my_turn + 1) % 3].id,
+                                self.players[(self.my_turn + 1) % 3].card_num
+                            ));
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        for (i, card) in my_card.carddata.iter().enumerate() {
                             // 根据偏移量添加顶部空白
-                            let offset = self.button_offsets[i];
-                            if offset > 0.0 {
-                                ui.add_space(offset);
-                            }
-                            
+                            let button_color = if self.button_offsets[i] {
+                                egui::Color32::from_rgb(100, 200, 100) // 点击后的绿色
+                            } else {
+                                egui::Color32::from_rgb(200, 100, 100) // 默认红色
+                            };
+
                             // 渲染按钮
-                            let button = egui::Button::new(format!("按钮 {}", i + 1));
-                            let response = ui.add_sized([80.0, 30.0], button);
-                            
+                            let button = egui::Button::new(format!("{}", card.display_name()))
+                                .fill(button_color);
+                            let response = ui.add_sized([30.0, 80.0], button);
+
                             // 处理点击事件
                             if response.clicked() {
-                                // 点击后向上移动10像素（增加偏移量）
-                                self.button_offsets[i] += 10.0;
-                                println!("按钮 {} 被点击，当前偏移: {}", i + 1, self.button_offsets[i]);
-                                
-                                // 请求重绘以显示移动效果
-                                ctx.request_repaint();
+                                self.button_offsets[i] = !self.button_offsets[i];
                             }
-                        });
-                    }
-
-
-
+                        }
+                    });
                 }
-                
-                
-
             });
 
             egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -357,16 +426,67 @@ impl eframe::App for MyApp {
                     }
                 }
                 if self.is_ready {
-                    if self.rounds%3 == self.my_turn {
+                    if (self.rounds == 0
+                        && !self.players.is_empty()
+                        && self.players[self.my_turn].is_lord)
+                        || self.rounds % 3 == self.my_turn
+                    {
                         if ui.button("出牌").clicked() {
+                            let play_card = self.get_play_card();
+                            let poke = check(play_card.clone());
+                            if poke.is_none() {
+                                self.toasts.add(Toast {
+                                    text: "你出你妈呢".into(),
+                                    kind: ToastKind::Error,
+                                    options: ToastOptions::default(),
+                                    ..Default::default()
+                                });
+                                self.reset_play();
+                            } else {
+                                let playground = self.current_cards.clone();
+                                if playground.is_some() {
+                                    let pg = playground.unwrap();
+                                    if compare(play_card.clone(), pg.carddata) {
+                                        let msg = Message {
+                                            id: self.id.clone(),
+                                            command: NetworkMessage::Play,
+                                            data: "".to_owned(),
+                                            carddata: play_card.clone(),
+                                        };
+                                        self.sendmsg(msg);
+                                        self.clear_play();
+                                    }else{
+                                        self.reset_play();
+                                        self.toasts.add(Toast {
+                                            text: "牌小了".into(),
+                                            kind: ToastKind::Error,
+                                            options: ToastOptions::default(),
+                                            ..Default::default()
+                                        });
+                                    }
+                                } else {
+                                    let msg = Message {
+                                            id: self.id.clone(),
+                                            command: NetworkMessage::Play,
+                                            data: "".to_owned(),
+                                            carddata: play_card.clone(),
+                                        };
+                                        self.sendmsg(msg);
+                                        self.clear_play();
+
+
+
+                                }
+                            }
+                        }
+                        if ui.button("过").clicked() {
                             let msg = Message {
                                 id: self.id.clone(),
-                                command: NetworkMessage::Ready,
+                                command: NetworkMessage::Skip,
                                 data: "".to_owned(),
                                 carddata: vec![],
                             };
                             self.sendmsg(msg);
-                            self.is_ready = true;
                         }
                     }
                 }
@@ -374,6 +494,7 @@ impl eframe::App for MyApp {
 
             // ui.label(format!("Hello '{name}', age {age}"));
         });
+        self.toasts.show(ctx);
     }
 
     // 👇 关键：窗口关闭时调用
